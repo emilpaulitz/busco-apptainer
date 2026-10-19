@@ -1,0 +1,63 @@
+Bootstrap: localimage
+From: /work/neumann19/busco/busco_6.1.0.sif
+
+# Patch layer on top of the existing busco_6.1.0.sif:
+# 1. Swap the bundled sepp 4.5.5 seppJsonMerger.jar (incompatible with
+#    standalone pplacer >= 1.1.alpha17 -> BUSCO #834, ticket 003) for the
+#    sepp v4.5.6 jar.
+# 2. Replace the bundled pplacer (alpha13, segfaults on this HPC, sepp
+#    issue #838) with the bioconda standalone pplacer 1.1.alpha22 binaries
+#    staged from /work/neumann19/envs/busco (all shared libs verified
+#    present in the base image).
+# 3. Patch busco 6.1.0's BuscoPlacer.py: _pick_dataset() hardcoded
+#    individual_placement[0] as the edge_num, which broke the same way as
+#    the sepp jar when pplacer >= 1.1.alpha17 moved edge_num to the second
+#    p-column (distal_length first). With integral distal_lengths (e.g. 0)
+#    the taxid regex matches arbitrary tree edges and auto-lineage selects
+#    a wrong lineage (e.g. euarchontoglires for a plant). The patch reads
+#    the position from the jplace "fields" array (ticket 003, BUSCO #834).
+#    Base file verified byte-identical to upstream busco 6.1.0.
+# Used because %post network access inside the docker://-bootstrapped build
+# is unreliable on this HPC even with https_proxy; the canonical busco.def
+# remains the full recipe for environments where that works. All staged
+# artifacts are sha256-verified.
+
+%files
+    /work/neumann19/busco/sepp_fix/jars/seppJsonMerger-4.5.6.jar /usr/local/bin/seppJsonMerger.jar
+    /work/neumann19/busco/sepp_fix/pplacer_bin/pplacer /usr/local/bin/pplacer
+    /work/neumann19/busco/sepp_fix/pplacer_bin/guppy /usr/local/bin/guppy
+    /work/neumann19/busco/sepp_fix/pplacer_bin/rppr /usr/local/bin/rppr
+    /work/neumann19/busco/sepp_fix/scripts/patches/BuscoPlacer.py /usr/local/lib/python3.12/site-packages/busco/BuscoPlacer.py
+
+%post
+    cd /usr/local/bin
+    sha256sum -c - <<'EOF'
+cd70b6228e16dab8f8ab8db1214bde877ed218485f650d51980be2b4ead9a161  seppJsonMerger.jar
+687a47d6d14f86ced39b95bb533930f268be6795b47c035dcbff3761c8eb091c  pplacer
+06ee64c9bb11bd8d6acefeffc8ae46a2aadc7e8ea6262b4065e454deda0048d5  guppy
+d5eb5a4f7f9207d9aa628be4a6b81942de8176bea9dd3522cf5a32d34d802599  rppr
+EOF
+    chmod 755 seppJsonMerger.jar pplacer guppy rppr
+    cd /usr/local/lib/python3.12/site-packages/busco
+    echo "734f5ff9f903a75558950651fcd9fadbff422ebc8f16dc5595a1526195b0d4ef  BuscoPlacer.py" | sha256sum -c -
+    python3 -m py_compile BuscoPlacer.py
+
+%environment
+    export PATH=/usr/local/bin:$PATH
+
+%runscript
+    exec busco "$@"
+
+%labels
+    Author Arne Neumann
+    Version 6.1.0
+    Source https://quay.io/repository/biocontainers/busco
+    Documentation https://busco.ezlab.org/busco_userguide.html
+
+%help
+    BUSCO container for Apptainer on the HPC.
+    Patched with sepp 4.5.6 seppJsonMerger.jar to restore --auto-lineage-euk
+    with standalone pplacer >= 1.1.alpha17 (BUSCO #834, ticket 003).
+    Usage:
+      apptainer run busco_6.1.0.sif busco -i INPUT --auto-lineage-euk -m proteins -c N -o OUT
+    Mount input/output locations with --bind.

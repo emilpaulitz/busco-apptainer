@@ -1,0 +1,90 @@
+Bootstrap: docker
+From: quay.io/biocontainers/busco:6.1.0--pyhdfd78af_2
+
+# Fully-fixed image (ticket 006): base biocontainer + standalone pplacer
+# (sepp issue #838) + sepp 4.5.6 seppJsonMerger.jar + BuscoPlacer.py patch
+# (both for BUSCO #834), so --auto-lineage runs as well as explicit -l.
+# The pplacer binaries are VENDORED in the repo (bioconda standalone
+# pplacer 1.1.alpha22, sha256-verified, ticket 003) so builds need no conda
+# repodata access - the HPC proxy currently fails anaconda.org repodata
+# fetches (ticket 006). Build with cwd = repo root (or the /work-staged
+# build dir): the %files sources below resolve relative to the CWD of
+# `apptainer build`.
+
+%files
+    scripts/patches/BuscoPlacer.py /usr/local/lib/python3.12/site-packages/busco/BuscoPlacer.py
+    pplacer_bin/pplacer /usr/local/bin/pplacer
+    pplacer_bin/guppy /usr/local/bin/guppy
+    pplacer_bin/rppr /usr/local/bin/rppr
+
+%post
+    # The upstream Dockerfile creates a dedicated 'busco_user' (uid 1000) and a
+    # '/busco_wd' workdir. On an HPC with Apptainer we run as the invoking user
+    # with uid/gid inherited, so we only need a writable workdir. The base
+    # image's conda env lives in /usr/local (its conda/mamba binaries were
+    # stripped by the biocontainer build).
+    mkdir -p /busco_wd
+    chmod -R 777 /usr/local/config
+    chmod 777 /busco_wd
+
+    # sepp 4.5.5's seppJsonMerger.jar is incompatible with standalone
+    # pplacer >= 1.1.alpha17 (jplace 'p' field order changed and edge labels
+    # switched from [N] to {N} style), which crashes BUSCO's auto-lineage
+    # with NumberFormatException (BUSCO #834, ticket 003). Overwrite it with
+    # the v4.5.6 jar, which reads field positions from the jplace 'fields'
+    # array and parses both label styles. sha256 of the tarball matches the
+    # bioconda sepp 4.5.6 recipe.
+    curl -sSL --retry 5 --retry-delay 10 --retry-all-errors \
+        -o /tmp/sepp-4.5.6.tar.gz \
+        https://github.com/smirarab/sepp/archive/v4.5.6.tar.gz
+    echo "e4aae4908b33d54d34c8796bc1f5aed38e8969c411102d713da075a0d7832560  /tmp/sepp-4.5.6.tar.gz" \
+        | sha256sum -c -
+    tar -xzf /tmp/sepp-4.5.6.tar.gz -C /tmp \
+        sepp-4.5.6/tools/merge/seppJsonMerger.jar
+    cp /tmp/sepp-4.5.6/tools/merge/seppJsonMerger.jar \
+        /usr/local/bin/seppJsonMerger.jar
+    rm -rf /tmp/sepp-4.5.6 /tmp/sepp-4.5.6.tar.gz
+
+    # pplacer: the vendored standalone binaries were %files'd over the base
+    # image's bundled alpha13 (which segfaults, sepp issue #838). Verify them
+    # against the ticket-003-validated hashes; gsl/openblas etc. are already
+    # in /usr/local/lib.
+    cd /usr/local/bin
+    sha256sum -c - <<'EOF'
+687a47d6d14f86ced39b95bb533930f268be6795b47c035dcbff3761c8eb091c  pplacer
+06ee64c9bb11bd8d6acefeffc8ae46a2aadc7e8ea6262b4065e454deda0048d5  guppy
+d5eb5a4f7f9207d9aa628be4a6b81942de8176bea9dd3522cf5a32d34d802599  rppr
+EOF
+    chmod 755 pplacer guppy rppr
+
+    # BUSCO-side twin bug (ticket 003, BUSCO #834): 6.1.0's
+    # BuscoPlacer._pick_dataset() hardcodes individual_placement[0] as the
+    # edge_num; with standalone pplacer >= 1.1.alpha17 p[0] is distal_length,
+    # so auto-lineage selected wrong lineages (e.g. euarchontoglires for a
+    # plant). The patched file is shipped via %files above; verify it and
+    # compile it.
+    cd /usr/local/lib/python3.12/site-packages/busco
+    echo "734f5ff9f903a75558950651fcd9fadbff422ebc8f16dc5595a1526195b0d4ef  BuscoPlacer.py" \
+        | sha256sum -c -
+    python3 -m py_compile BuscoPlacer.py
+
+%environment
+    # Base image's conda env (busco, sepp, pplacer) lives in /usr/local/bin
+    export PATH=/usr/local/bin:$PATH
+
+%runscript
+    exec busco "$@"
+
+%labels
+    Author Arne Neumann
+    Version 6.1.0
+    Source https://quay.io/repository/biocontainers/busco
+    Documentation https://busco.ezlab.org/busco_userguide.html
+
+%help
+    BUSCO 6.1.0 container for Apptainer on the HPC, fully fixed
+    (standalone pplacer, sepp 4.5.6 merger jar, BuscoPlacer edge_num patch).
+    Both explicit-lineage and --auto-lineage runs work.
+    Usage:
+      apptainer run busco_6.1.0.sif busco -i INPUT --auto-lineage-euk -m proteins -c N -o OUT
+    Mount input/output locations with --bind.
